@@ -14,6 +14,7 @@ persistent storage.
 import os
 import time
 import urllib.request
+import uuid
 from datetime import datetime
 
 import av
@@ -48,10 +49,26 @@ st.caption(
 )
 
 # ---------------------------------------------------------------------------
-# Session state
+# State
 # ---------------------------------------------------------------------------
+# Streamlit re-runs this whole script top-to-bottom on every interaction, so a
+# plain module-level variable would be wiped out before the background WebRTC
+# thread ever reads it. st.cache_resource gives us an object that survives
+# reruns. We key it per-visitor (a random id stashed in session_state) so
+# different visitors' trained models never collide with each other.
+if "uid" not in st.session_state:
+    st.session_state.uid = str(uuid.uuid4())
+
+
+@st.cache_resource
+def _get_recognizer_store():
+    return {}
+
+
+_recognizer_store = _get_recognizer_store()  # {uid: trained cv2 recognizer}
+
 if "samples" not in st.session_state:
-    st.session_state.samples = []          # captured face crops (numpy arrays)
+    st.session_state.samples = []  # captured face crops (numpy arrays)
 if "recognizer" not in st.session_state:
     st.session_state.recognizer = None
 
@@ -81,16 +98,16 @@ class RegisterProcessor(VideoProcessorBase):
 
 class RecognizeProcessor(VideoProcessorBase):
     """
-    Runs live recognition against the session's trained model.
+    Runs live recognition against the visitor's trained model.
 
-    IMPORTANT: recv() runs in a background thread managed by streamlit-webrtc.
-    Streamlit's st.session_state is NOT safe to read/write from that thread,
-    so this class keeps its own instance-local state (self.log, self.last_marked)
-    and the main script polls it via ctx.video_processor after a rerun.
+    IMPORTANT: both __init__ (via the factory) and recv() run on a background
+    thread managed by streamlit-webrtc, where st.session_state and other
+    st.* calls are not safe. This class only ever touches plain Python
+    objects (the recognizer passed in, and its own instance attributes).
     """
 
-    def __init__(self):
-        self.recognizer = st.session_state.recognizer
+    def __init__(self, recognizer=None):
+        self.recognizer = recognizer
         self.log = []
         self.last_marked = 0.0
 
@@ -152,6 +169,7 @@ if mode == "1. Register your face":
         if st.button("🗑️ Reset samples"):
             st.session_state.samples = []
             st.session_state.recognizer = None
+            _recognizer_store.pop(st.session_state.uid, None)
             st.rerun()
 
     st.progress(min(len(st.session_state.samples) / SAMPLES_NEEDED, 1.0))
@@ -163,6 +181,7 @@ if mode == "1. Register your face":
             labels = np.zeros(len(st.session_state.samples), dtype=np.int32)
             recognizer.train(st.session_state.samples, labels)
             st.session_state.recognizer = recognizer
+            _recognizer_store[st.session_state.uid] = recognizer
             st.success("Model trained! Switch to '2. Live recognition' in the sidebar.")
 
 # ---------------------------------------------------------------------------
@@ -174,11 +193,20 @@ else:
         st.warning("Train a model first in '1. Register your face'.")
     else:
         st.write("You should see a green box with **You** once recognized.")
+
+        # Captured here (main thread) as a plain value — safe for the
+        # factory to use even though streamlit-webrtc invokes it on a
+        # background thread, since it never touches st.* itself.
+        my_recognizer = _recognizer_store.get(st.session_state.uid)
+
+        def _make_recognize_processor():
+            return RecognizeProcessor(recognizer=my_recognizer)
+
         ctx = webrtc_streamer(
             key="recognize",
             mode=WebRtcMode.SENDRECV,
             rtc_configuration=RTC_CONFIGURATION,
-            video_processor_factory=RecognizeProcessor,
+            video_processor_factory=_make_recognize_processor,
             media_stream_constraints={"video": True, "audio": False},
         )
 
