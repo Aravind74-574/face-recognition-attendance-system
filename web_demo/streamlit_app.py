@@ -54,10 +54,6 @@ if "samples" not in st.session_state:
     st.session_state.samples = []          # captured face crops (numpy arrays)
 if "recognizer" not in st.session_state:
     st.session_state.recognizer = None
-if "attendance_log" not in st.session_state:
-    st.session_state.attendance_log = []
-if "last_marked" not in st.session_state:
-    st.session_state.last_marked = 0
 
 mode = st.sidebar.radio("Mode", ["1. Register your face", "2. Live recognition"])
 
@@ -84,10 +80,19 @@ class RegisterProcessor(VideoProcessorBase):
 
 
 class RecognizeProcessor(VideoProcessorBase):
-    """Runs live recognition against the session's trained model."""
+    """
+    Runs live recognition against the session's trained model.
+
+    IMPORTANT: recv() runs in a background thread managed by streamlit-webrtc.
+    Streamlit's st.session_state is NOT safe to read/write from that thread,
+    so this class keeps its own instance-local state (self.log, self.last_marked)
+    and the main script polls it via ctx.video_processor after a rerun.
+    """
 
     def __init__(self):
         self.recognizer = st.session_state.recognizer
+        self.log = []
+        self.last_marked = 0.0
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
@@ -101,11 +106,9 @@ class RecognizeProcessor(VideoProcessorBase):
                 if confidence <= CONFIDENCE_THRESHOLD:
                     text, color = f"You ({confidence:.0f})", (0, 200, 0)
                     now = time.time()
-                    if now - st.session_state.last_marked > 5:
-                        st.session_state.attendance_log.append(
-                            datetime.now().strftime("%H:%M:%S")
-                        )
-                        st.session_state.last_marked = now
+                    if now - self.last_marked > 5:
+                        self.log.append(datetime.now().strftime("%H:%M:%S"))
+                        self.last_marked = now
                 else:
                     text, color = f"Unknown ({confidence:.0f})", (0, 0, 255)
             else:
@@ -171,7 +174,7 @@ else:
         st.warning("Train a model first in '1. Register your face'.")
     else:
         st.write("You should see a green box with **You** once recognized.")
-        webrtc_streamer(
+        ctx = webrtc_streamer(
             key="recognize",
             mode=WebRtcMode.SENDRECV,
             rtc_configuration=RTC_CONFIGURATION,
@@ -180,11 +183,14 @@ else:
         )
 
         st.subheader("Session attendance log")
-        if st.session_state.attendance_log:
-            for t in st.session_state.attendance_log:
+        if st.button("🔄 Refresh log"):
+            st.rerun()
+
+        if ctx.video_processor and ctx.video_processor.log:
+            for t in ctx.video_processor.log:
                 st.write(f"✅ Marked present at {t}")
         else:
-            st.write("No attendance marked yet this session.")
+            st.write("No attendance marked yet this session. Click 'Refresh log' after being recognized.")
 
 st.divider()
 st.caption(
