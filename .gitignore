@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+dataset/*
+!dataset/.gitkeep
+trainer/*
+!trainer/.gitkeep
+attendance/*
+!attendance/.gitkeep
+students.csv
+haarcascade_frontalface_default.xml
